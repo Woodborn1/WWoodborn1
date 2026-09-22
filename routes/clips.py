@@ -15,7 +15,7 @@ async def list_clips(
     min_views: int = Query(0, ge=0, description="Мінімальна кількість переглядів"),
     streamer: Optional[str] = Query(None, description="Фільтр за нікнеймом стрімера (наприклад, Leb1ga, Ghostik, Kavalets)"),
     category: Optional[str] = Query(None, description="Фільтр за категорією/грою (наприклад, Just Chatting, Dota 2, Counter-Strike)"),
-    period: Optional[str] = Query(None, description="Період: '1d' (за 1 день/24h), '7d' (за тиждень), '30d' (за місяць), 'all'"),
+    period: Optional[str] = Query("1d", description="Період: '1d' (за 1 день/24h), '7d' (за тиждень), '30d' (за місяць), 'all'"),
     days: Optional[int] = Query(None, ge=1, le=365, description="Точна кількість днів (наприклад, 1, 7, 30)"),
     sort_by: str = Query("views", description="Сортування: 'views' (найпопулярніші), 'recent' (найновіші), 'chat' (активність чату)"),
     region: str = Query("ua", description="База стрімерів: 'ua' (українські) або 'en' (англійські)"),
@@ -32,6 +32,8 @@ async def list_clips(
     - **created_at**: дата створення кліпу
     - **chat_activity**: кількість повідомлень у чаті (опціонально)
     """
+    selected_period = None if period and period.lower() in ["all", "none"] else period
+    
     if is_mongo_enabled():
         raw_clips = await get_clips_mongo(
             limit=limit,
@@ -39,7 +41,7 @@ async def list_clips(
             min_views=min_views,
             streamer=streamer,
             category=category,
-            period=period,
+            period=selected_period,
             days=days,
             sort_by=sort_by,
             region=region
@@ -48,7 +50,7 @@ async def list_clips(
             min_views=min_views,
             streamer=streamer,
             category=category,
-            period=period,
+            period=selected_period,
             days=days,
             region=region
         )
@@ -60,7 +62,7 @@ async def list_clips(
             streamer=streamer,
             category=category,
             status=status,
-            period=period,
+            period=selected_period,
             days=days,
             sort_by=sort_by
         )
@@ -69,7 +71,7 @@ async def list_clips(
             streamer=streamer,
             category=category,
             status=status,
-            period=period,
+            period=selected_period,
             days=days
         )
     
@@ -78,22 +80,24 @@ async def list_clips(
 
 @router.get("/clips/queue", summary="Отримати чергу нових кліпів для пайплайну обробки")
 async def get_clip_queue(
-    limit: int = Query(500, ge=1, le=2000),
+    limit: int = Query(1000, ge=1, le=2000),
     min_views: int = Query(0, ge=0),
     streamer: Optional[str] = Query(None, description="Фільтр за стрімером"),
-    period: Optional[str] = Query(None, description="Період: '1d', '7d', '30d'"),
+    period: Optional[str] = Query("1d", description="Період: '1d', '7d', '30d', 'all'"),
     region: str = Query("ua")
 ):
     """
-    Повертає кліпи для транскрипції та обробки в Obsidian.
+    Повертає кліпи для транскрипції та обробки в Obsidian (за замовчуванням за 1 день).
     """
+    selected_period = None if period and period.lower() in ["all", "none"] else period
+    
     if is_mongo_enabled():
         raw_clips = await get_clips_mongo(
             limit=limit,
             offset=0,
             min_views=min_views,
             streamer=streamer,
-            period=period,
+            period=selected_period,
             sort_by="views",
             region=region
         )
@@ -103,7 +107,7 @@ async def get_clip_queue(
             offset=0,
             min_views=min_views,
             streamer=streamer,
-            period=period,
+            period=selected_period,
             status="pending",
             sort_by="views"
         )
