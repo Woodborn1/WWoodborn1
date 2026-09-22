@@ -7,11 +7,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: vamous
+      - key: MONGODB_COLLECTION_NAME
+        value: clips
       - key: DATABASE_PATH
         value: vamous_clips.db
-      - key: TWITCH_CLIENT_ID
-        sync: false
-      - key: TWITCH_CLIENT_SECRET
-        sync: false
-      - key: STREAMERS
-        value: Leb1ga,Kavalets,Ghostik,viktoriia_tori,mikhailo_lebiga

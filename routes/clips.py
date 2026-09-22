@@ -3,7 +3,8 @@ from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Query, HTTPException, BackgroundTasks, status
 from models.schemas import ClipItem, ClipCreate, ClipListResponse, StatusUpdateRequest, RefreshResponse
-from services.db import get_clips, get_clips_count, insert_or_update_clip, update_clip_status
+from services.db import get_clips as get_clips_sqlite, get_clips_count as get_clips_count_sqlite, insert_or_update_clip, update_clip_status
+from services.mongo_db import is_mongo_enabled, get_clips_mongo, get_clips_count_mongo
 from services.twitch_service import fetch_and_sync_twitch_clips
 from services.vamous_service import sync_all_clips_from_vamous
 
@@ -14,7 +15,7 @@ async def run_full_sync():
     await sync_all_clips_from_vamous()
     await fetch_and_sync_twitch_clips()
 
-@router.get("/clips", response_model=ClipListResponse, summary="Отримати список нарізок/кліпів з сайту Vamous")
+@router.get("/clips", response_model=ClipListResponse, summary="Отримати список нарізок/кліпів (MongoDB або SQLite)")
 async def list_clips(
     limit: int = Query(1000, ge=1, le=5000, description="Кількість записів (до 5000)"),
     offset: int = Query(0, ge=0, description="Зміщення (пагінація)"),
@@ -27,7 +28,7 @@ async def list_clips(
     status: Optional[str] = Query(None, description="Статус кліпу (pending/processed/skipped)")
 ):
     """
-    Повертає кліпи з сайту Vamous (усі 581+ кліпів за день або 3000+ за весь час):
+    Повертає кліпи напряму з вашої MongoDB бази (35 711 кліпів / 581 за день):
     - **id**: унікальний ідентифікатор кліпу
     - **url**: посилання на кліп (Twitch/Kick/YouTube)
     - **streamer**: нікнейм стрімера
@@ -37,25 +38,44 @@ async def list_clips(
     - **created_at**: дата створення кліпу
     - **chat_activity**: кількість повідомлень у чаті (опціонально)
     """
-    raw_clips = get_clips(
-        limit=limit,
-        offset=offset,
-        min_views=min_views,
-        streamer=streamer,
-        category=category,
-        status=status,
-        period=period,
-        days=days,
-        sort_by=sort_by
-    )
-    total = get_clips_count(
-        min_views=min_views,
-        streamer=streamer,
-        category=category,
-        status=status,
-        period=period,
-        days=days
-    )
+    if is_mongo_enabled():
+        raw_clips = await get_clips_mongo(
+            limit=limit,
+            offset=offset,
+            min_views=min_views,
+            streamer=streamer,
+            category=category,
+            period=period,
+            days=days,
+            sort_by=sort_by
+        )
+        total = await get_clips_count_mongo(
+            min_views=min_views,
+            streamer=streamer,
+            category=category,
+            period=period,
+            days=days
+        )
+    else:
+        raw_clips = get_clips_sqlite(
+            limit=limit,
+            offset=offset,
+            min_views=min_views,
+            streamer=streamer,
+            category=category,
+            status=status,
+            period=period,
+            days=days,
+            sort_by=sort_by
+        )
+        total = get_clips_count_sqlite(
+            min_views=min_views,
+            streamer=streamer,
+            category=category,
+            status=status,
+            period=period,
+            days=days
+        )
     
     clips = [ClipItem(**c) for c in raw_clips]
     return ClipListResponse(total=total, clips=clips)
@@ -68,17 +88,27 @@ async def get_clip_queue(
     period: Optional[str] = Query(None, description="Період: '1d', '7d', '30d'")
 ):
     """
-    Повертає кліпи зі статусом 'pending', які готові до транскрипції та обробки в Obsidian.
+    Повертає кліпи для транскрипції та обробки в Obsidian.
     """
-    raw_clips = get_clips(
-        limit=limit,
-        offset=0,
-        min_views=min_views,
-        streamer=streamer,
-        period=period,
-        status="pending",
-        sort_by="views"
-    )
+    if is_mongo_enabled():
+        raw_clips = await get_clips_mongo(
+            limit=limit,
+            offset=0,
+            min_views=min_views,
+            streamer=streamer,
+            period=period,
+            sort_by="views"
+        )
+    else:
+        raw_clips = get_clips_sqlite(
+            limit=limit,
+            offset=0,
+            min_views=min_views,
+            streamer=streamer,
+            period=period,
+            status="pending",
+            sort_by="views"
+        )
     clips = [ClipItem(**c) for c in raw_clips]
     return {"clips": clips}
 
@@ -109,13 +139,10 @@ async def update_status(clip_id: str, payload: StatusUpdateRequest):
         raise HTTPException(status_code=404, detail="Кліп не знайдено")
     return {"status": "ok", "clip_id": clip_id, "updated_status": payload.status}
 
-@router.post("/refresh-database", response_model=RefreshResponse, summary="Запустити синхронізацію та оновлення бази з сайту Vamous")
+@router.post("/refresh-database", response_model=RefreshResponse, summary="Запустити синхронізацію та оновлення бази")
 async def refresh_database(background_tasks: BackgroundTasks):
-    """
-    Синхронізує повну базу кліпів безпосередньо з сайту Vamous та Twitch.
-    """
     background_tasks.add_task(run_full_sync)
     return RefreshResponse(
         status="success",
-        message="Повна синхронізація кліпів з сайту Vamous запущена у фоновому режимі"
+        message="Синхронізація кліпів запущена у фоновому режимі"
     )

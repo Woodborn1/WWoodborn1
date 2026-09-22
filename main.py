@@ -8,13 +8,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from services.db import init_db
+from services.mongo_db import is_mongo_enabled, get_mongo_client
 from services.vamous_service import sync_all_clips_from_vamous
 from services.twitch_service import fetch_and_sync_twitch_clips
 from routes.clips import router as clips_router
 
 async def periodic_sync_worker():
-    """Periodically fetches clips from Vamous site and Twitch every 30 minutes."""
-    # Run immediate sync on startup
+    """Periodically fetches clips from Vamous site and Twitch every 30 minutes if using local SQLite."""
+    if is_mongo_enabled():
+        print("[App] MongoDB is active. Bypassing local SQLite sync.")
+        return
+        
     try:
         await sync_all_clips_from_vamous()
         await fetch_and_sync_twitch_clips(days_back=30)
@@ -31,10 +35,12 @@ async def periodic_sync_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database tables
-    init_db()
-    
-    # Start background sync task
+    if is_mongo_enabled():
+        print("[App] Connecting to MongoDB Atlas / Remote Database...")
+        get_mongo_client()
+    else:
+        init_db()
+        
     sync_task = asyncio.create_task(periodic_sync_worker())
     
     yield
@@ -43,8 +49,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vamous Stream Clips API",
-    description="REST API ендпоінт для нарізок та кліпів сайту Vamous (Twitch / Kick / YouTube)",
-    version="1.0.0",
+    description="REST API ендпоінт для нарізок та кліпів сайту Vamous (Twitch / Kick / YouTube) з підтримкою MongoDB",
+    version="1.1.0",
     lifespan=lifespan
 )
 
@@ -62,9 +68,11 @@ app.include_router(clips_router)
 
 @app.get("/", summary="Root Endpoint")
 async def root():
+    db_type = "MongoDB" if is_mongo_enabled() else "SQLite"
     return {
         "service": "Vamous Clips API",
         "status": "online",
+        "database": db_type,
         "docs_url": "/docs",
         "endpoints": {
             "clips": "/api/clips",
