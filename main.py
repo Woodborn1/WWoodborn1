@@ -8,17 +8,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from services.db import init_db
+from services.vamous_service import sync_all_clips_from_vamous
 from services.twitch_service import fetch_and_sync_twitch_clips
 from routes.clips import router as clips_router
 
-async def periodic_twitch_sync():
-    """Periodically fetches trending and fresh clips every 30 minutes."""
+async def periodic_sync_worker():
+    """Periodically fetches clips from Vamous site and Twitch every 30 minutes."""
+    # Run immediate sync on startup
+    try:
+        await sync_all_clips_from_vamous()
+        await fetch_and_sync_twitch_clips(days_back=30)
+    except Exception as e:
+        print(f"[PeriodicSync] Initial sync error: {e}")
+        
     while True:
+        await asyncio.sleep(1800)  # 30 minutes
         try:
+            await sync_all_clips_from_vamous()
             await fetch_and_sync_twitch_clips(days_back=30)
         except Exception as e:
             print(f"[PeriodicSync] Error in periodic sync: {e}")
-        await asyncio.sleep(1800)  # 30 minutes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,7 +35,7 @@ async def lifespan(app: FastAPI):
     init_db()
     
     # Start background sync task
-    sync_task = asyncio.create_task(periodic_twitch_sync())
+    sync_task = asyncio.create_task(periodic_sync_worker())
     
     yield
     

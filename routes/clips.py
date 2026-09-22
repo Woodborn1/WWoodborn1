@@ -5,23 +5,29 @@ from fastapi import APIRouter, Query, HTTPException, BackgroundTasks, status
 from models.schemas import ClipItem, ClipCreate, ClipListResponse, StatusUpdateRequest, RefreshResponse
 from services.db import get_clips, get_clips_count, insert_or_update_clip, update_clip_status
 from services.twitch_service import fetch_and_sync_twitch_clips
+from services.vamous_service import sync_all_clips_from_vamous
 
 router = APIRouter(prefix="/api", tags=["Clips"])
 
-@router.get("/clips", response_model=ClipListResponse, summary="Отримати список нарізок/кліпів з фільтрами")
+async def run_full_sync():
+    """Runs sync from both Vamous site and Twitch."""
+    await sync_all_clips_from_vamous()
+    await fetch_and_sync_twitch_clips()
+
+@router.get("/clips", response_model=ClipListResponse, summary="Отримати список нарізок/кліпів з сайту Vamous")
 async def list_clips(
-    limit: int = Query(50, ge=1, le=200, description="Кількість записів"),
+    limit: int = Query(1000, ge=1, le=5000, description="Кількість записів (до 5000)"),
     offset: int = Query(0, ge=0, description="Зміщення (пагінація)"),
     min_views: int = Query(0, ge=0, description="Мінімальна кількість переглядів"),
-    streamer: Optional[str] = Query(None, description="Фільтр за нікнеймом стрімера (наприклад, Leb1ga, Kavalets)"),
-    category: Optional[str] = Query(None, description="Фільтр за категорією/грою (наприклад, Just Chatting, Dota 2)"),
+    streamer: Optional[str] = Query(None, description="Фільтр за нікнеймом стрімера"),
+    category: Optional[str] = Query(None, description="Фільтр за категорією/грою"),
     period: Optional[str] = Query(None, description="Період: '1d' (за день/24h), '7d' (за тиждень), '30d' (за місяць), 'all'"),
     days: Optional[int] = Query(None, ge=1, le=365, description="Точна кількість днів (наприклад, 1, 30)"),
     sort_by: str = Query("views", description="Сортування: 'views' (найпопулярніші), 'recent' (найновіші), 'chat' (активність чату)"),
     status: Optional[str] = Query(None, description="Статус кліпу (pending/processed/skipped)")
 ):
     """
-    Повертає кліпи за заданими фільтрами (за 1 день, 30 днів, конкретного стрімера тощо):
+    Повертає кліпи з сайту Vamous (усі 581+ кліпів за день або 3000+ за весь час):
     - **id**: унікальний ідентифікатор кліпу
     - **url**: посилання на кліп (Twitch/Kick/YouTube)
     - **streamer**: нікнейм стрімера
@@ -56,8 +62,8 @@ async def list_clips(
 
 @router.get("/clips/queue", summary="Отримати чергу нових кліпів для пайплайну обробки")
 async def get_clip_queue(
-    limit: int = Query(50, ge=1, le=100),
-    min_views: int = Query(50, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+    min_views: int = Query(0, ge=0),
     streamer: Optional[str] = Query(None, description="Фільтр за стрімером"),
     period: Optional[str] = Query(None, description="Період: '1d', '7d', '30d'")
 ):
@@ -103,13 +109,13 @@ async def update_status(clip_id: str, payload: StatusUpdateRequest):
         raise HTTPException(status_code=404, detail="Кліп не знайдено")
     return {"status": "ok", "clip_id": clip_id, "updated_status": payload.status}
 
-@router.post("/refresh-database", response_model=RefreshResponse, summary="Запустити синхронізацію та оновлення бази кліпів")
-async def refresh_database(background_tasks: BackgroundTasks, days: int = Query(7, ge=1, le=30)):
+@router.post("/refresh-database", response_model=RefreshResponse, summary="Запустити синхронізацію та оновлення бази з сайту Vamous")
+async def refresh_database(background_tasks: BackgroundTasks):
     """
-    Синхронізує найновіші кліпи стрімерів з Twitch / API.
+    Синхронізує повну базу кліпів безпосередньо з сайту Vamous та Twitch.
     """
-    background_tasks.add_task(fetch_and_sync_twitch_clips, days_back=days)
+    background_tasks.add_task(run_full_sync)
     return RefreshResponse(
         status="success",
-        message=f"Оновлення бази кліпів за останні {days} дн. запущено у фоновому режимі"
+        message="Повна синхронізація кліпів з сайту Vamous запущена у фоновому режимі"
     )
