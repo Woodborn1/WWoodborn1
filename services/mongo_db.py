@@ -1,14 +1,39 @@
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URL") or os.getenv("DATABASE_URL")
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "vamous")
-MONGODB_COLLECTION_NAME = os.getenv("MONGODB_COLLECTION_NAME", "clips")
+DEFAULT_MONGO_URI = "mongodb+srv://woodborn1:E54w2tdKMhF5tKMd@cluster0.gsoelvs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URL") or os.getenv("DATABASE_URL") or DEFAULT_MONGO_URI
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "twitch_data")
 
 client: Optional[AsyncIOMotorClient] = None
+
+# Built-in Game ID to Name dictionary for fast lookup
+COMMON_GAMES: Dict[str, str] = {
+    "509658": "Just Chatting",
+    "29595": "Dota 2",
+    "32399": "Counter-Strike",
+    "516575": "VALORANT",
+    "21779": "League of Legends",
+    "33214": "Fortnite",
+    "27471": "Minecraft",
+    "512710": "Call of Duty: Warzone",
+    "511224": "Apex Legends",
+    "181319": "Grand Theft Auto V",
+    "29106": "S.T.A.L.K.E.R. 2: Heart of Chornobyl",
+    "509672": "Travel & Outdoors",
+    "509660": "Art",
+    "26936": "Music",
+    "498592": "I'm Only Sleeping",
+    "518203": "Sports",
+    "513143": "Teamfight Tactics",
+    "490100": "LOST ARK",
+    "143106037": "EA Sports FC 24",
+    "1745202779": "EA Sports FC 25",
+    "497078": "PUBG: BATTLEGROUNDS"
+}
 
 def is_mongo_enabled() -> bool:
     return bool(MONGODB_URI and (MONGODB_URI.startswith("mongodb://") or MONGODB_URI.startswith("mongodb+srv://")))
@@ -21,56 +46,41 @@ def get_mongo_client() -> Optional[AsyncIOMotorClient]:
         client = AsyncIOMotorClient(MONGODB_URI)
     return client
 
-def get_collection():
+def get_collection(region: str = "ua"):
     c = get_mongo_client()
     if c is None:
         return None
-    
-    # If DB name specified in URI, use default database
-    db = c.get_default_database() if c.get_default_database() is not None else c[MONGODB_DB_NAME]
-    return db[MONGODB_COLLECTION_NAME]
-
-def format_date_to_iso(val: Any) -> str:
-    if isinstance(val, datetime):
-        return val.isoformat() + "Z"
-    if isinstance(val, str):
-        # Try DD.MM.YYYY HH:MM:SS
-        try:
-            dt = datetime.strptime(val.strip(), "%d.%m.%Y %H:%M:%S")
-            return dt.isoformat() + "Z"
-        except Exception:
-            pass
-        try:
-            dt = datetime.strptime(val.strip(), "%d.%m.%Y")
-            return dt.isoformat() + "Z"
-        except Exception:
-            pass
-        return val
-    return datetime.utcnow().isoformat() + "Z"
+    db = c[MONGODB_DB_NAME]
+    col_name = "clips_en" if region.lower() == "en" else "clips"
+    return db[col_name]
 
 def map_mongo_doc_to_clip(doc: Dict[str, Any]) -> Dict[str, Any]:
-    clip_id = str(doc.get("id") or doc.get("clipId") or doc.get("_id") or "")
-    url = str(doc.get("url") or doc.get("clipUrl") or doc.get("link") or "")
-    streamer = str(doc.get("streamer") or doc.get("author") or doc.get("channel") or "Стрімер")
-    title = str(doc.get("title") or doc.get("name") or "Нарізка з Vamous")
+    clip_id = str(doc.get("id") or doc.get("_id") or "")
+    url = str(doc.get("url") or f"https://clips.twitch.tv/{clip_id}")
+    streamer = str(doc.get("broadcaster_name") or doc.get("streamer") or doc.get("author") or "Стрімер")
+    title = str(doc.get("title") or "Нарізка з Vamous")
     
-    views = doc.get("views") or doc.get("viewCount") or doc.get("view_count") or 0
+    views = doc.get("view_count")
+    if views is None:
+        views = doc.get("views") or 0
     if not isinstance(views, int):
         try:
             views = int(views)
         except Exception:
             views = 0
             
-    category = doc.get("category") or doc.get("game") or doc.get("game_name") or "Just Chatting"
-    created_at_raw = doc.get("created_at") or doc.get("createdAt") or doc.get("date") or doc.get("timestamp")
-    created_at = format_date_to_iso(created_at_raw)
+    game_id = str(doc.get("game_id") or "")
+    category = doc.get("category") or doc.get("game") or COMMON_GAMES.get(game_id) or (f"Game ID {game_id}" if game_id else "Just Chatting")
     
-    chat_activity = doc.get("chat_activity") or doc.get("chatActivity") or doc.get("commentsCount")
-    if chat_activity is not None:
-        try:
-            chat_activity = int(chat_activity)
-        except Exception:
-            chat_activity = None
+    created_at_dt = doc.get("created_at_dt")
+    if isinstance(created_at_dt, datetime):
+        if created_at_dt.tzinfo is None:
+            created_at_dt = created_at_dt.replace(tzinfo=timezone.utc)
+        created_at = created_at_dt.isoformat()
+    else:
+        created_at = str(doc.get("created_at") or datetime.now(timezone.utc).isoformat())
+
+    chat_activity = doc.get("chat_activity") or doc.get("chatActivity")
 
     return {
         "id": clip_id,
@@ -83,23 +93,7 @@ def map_mongo_doc_to_clip(doc: Dict[str, Any]) -> Dict[str, Any]:
         "chat_activity": chat_activity
     }
 
-async def get_clips_mongo(
-    limit: int = 1000,
-    offset: int = 0,
-    min_views: int = 0,
-    streamer: Optional[str] = None,
-    category: Optional[str] = None,
-    period: Optional[str] = None,
-    days: Optional[int] = None,
-    sort_by: str = "views"
-) -> List[Dict[str, Any]]:
-    col = get_collection()
-    if col is None:
-        return []
-
-    filter_query: Dict[str, Any] = {}
-    
-    # Calculate cutoff date
+def parse_period_to_cutoff_dt(period: Optional[str], days: Optional[int] = None) -> Optional[datetime]:
     target_days = None
     if days is not None and days > 0:
         target_days = days
@@ -115,58 +109,89 @@ async def get_clips_mongo(
             target_days = int(p[:-1])
 
     if target_days:
-        cutoff_dt = datetime.utcnow() - timedelta(days=target_days)
-        cutoff_str_iso = cutoff_dt.isoformat()
-        cutoff_str_ua = cutoff_dt.strftime("%d.%m.%Y")
-        
-        # Support both datetime fields (createdAt/created_at) and string dates
-        filter_query["$or"] = [
-            {"createdAt": {"$gte": cutoff_dt}},
-            {"created_at": {"$gte": cutoff_dt}},
-            {"createdAt": {"$gte": cutoff_str_iso}},
-            {"created_at": {"$gte": cutoff_str_iso}},
-            {"createdAt": {"$gte": cutoff_str_ua}}
+        return datetime.now(timezone.utc) - timedelta(days=target_days)
+    return None
+
+def build_mongo_filter(
+    min_views: int = 0,
+    streamer: Optional[str] = None,
+    category: Optional[str] = None,
+    period: Optional[str] = None,
+    days: Optional[int] = None
+) -> Dict[str, Any]:
+    query: Dict[str, Any] = {}
+    
+    cutoff_dt = parse_period_to_cutoff_dt(period, days)
+    if cutoff_dt:
+        # Match against created_at_dt (datetime) or fallback to created_at (string)
+        query["$or"] = [
+            {"created_at_dt": {"$gte": cutoff_dt}},
+            {"created_at": {"$gte": cutoff_dt.isoformat()}}
         ]
 
     if min_views > 0:
-        filter_query["$or"] = filter_query.get("$or", [])
-        views_filter = [
-            {"views": {"$gte": min_views}},
-            {"viewCount": {"$gte": min_views}}
-        ]
-        if filter_query.get("$or"):
-            filter_query = {"$and": [{"$or": filter_query["$or"]}, {"$or": views_filter}]}
+        views_cond = {"$or": [{"view_count": {"$gte": min_views}}, {"views": {"$gte": min_views}}]}
+        if "$or" in query:
+            query = {"$and": [{"$or": query["$or"]}, views_cond]}
         else:
-            filter_query["$or"] = views_filter
+            query["$or"] = views_cond["$or"]
 
     if streamer:
-        regex_pattern = {"$regex": f"^{re.escape(streamer.strip())}$", "$options": "i"}
-        streamer_condition = {"$or": [{"streamer": regex_pattern}, {"author": regex_pattern}, {"channel": regex_pattern}]}
-        if "$and" in filter_query:
-            filter_query["$and"].append(streamer_condition)
-        elif filter_query:
-            filter_query = {"$and": [filter_query, streamer_condition]}
+        clean_streamer = streamer.strip()
+        reg = {"$regex": f"^{re.escape(clean_streamer)}$", "$options": "i"}
+        s_cond = {"$or": [{"broadcaster_name": reg}, {"streamer": reg}, {"author": reg}]}
+        if "$and" in query:
+            query["$and"].append(s_cond)
+        elif query:
+            query = {"$and": [query, s_cond]}
         else:
-            filter_query = streamer_condition
+            query = s_cond
 
     if category:
-        cat_pattern = {"$regex": f"^{re.escape(category.strip())}$", "$options": "i"}
-        cat_condition = {"$or": [{"category": cat_pattern}, {"game": cat_pattern}]}
-        if "$and" in filter_query:
-            filter_query["$and"].append(cat_condition)
-        elif filter_query:
-            filter_query = {"$and": [filter_query, cat_condition]}
+        clean_cat = category.strip()
+        # Find matching game_id if in COMMON_GAMES
+        matched_gids = [gid for gid, name in COMMON_GAMES.items() if clean_cat.lower() in name.lower()]
+        cat_reg = {"$regex": re.escape(clean_cat), "$options": "i"}
+        c_conditions = [{"category": cat_reg}, {"game": cat_reg}]
+        if matched_gids:
+            c_conditions.append({"game_id": {"$in": matched_gids}})
+        c_cond = {"$or": c_conditions}
+        
+        if "$and" in query:
+            query["$and"].append(c_cond)
+        elif query:
+            query = {"$and": [query, c_cond]}
         else:
-            filter_query = cat_condition
+            query = c_cond
+
+    return query
+
+async def get_clips_mongo(
+    limit: int = 1000,
+    offset: int = 0,
+    min_views: int = 0,
+    streamer: Optional[str] = None,
+    category: Optional[str] = None,
+    period: Optional[str] = None,
+    days: Optional[int] = None,
+    sort_by: str = "views",
+    region: str = "ua"
+) -> List[Dict[str, Any]]:
+    col = get_collection(region)
+    if col is None:
+        return []
+
+    filter_query = build_mongo_filter(min_views, streamer, category, period, days)
 
     # Sorting
-    sort_fields = [("views", -1), ("createdAt", -1)]
     if sort_by in ["recent", "date"]:
-        sort_fields = [("createdAt", -1), ("created_at", -1), ("_id", -1)]
+        sort_spec = [("created_at_dt", -1), ("_id", -1)]
     elif sort_by == "chat":
-        sort_fields = [("chat_activity", -1), ("chatActivity", -1)]
+        sort_spec = [("chat_activity", -1), ("view_count", -1)]
+    else:  # default 'views'
+        sort_spec = [("view_count", -1), ("created_at_dt", -1)]
 
-    cursor = col.find(filter_query).sort(sort_fields).skip(offset).limit(limit)
+    cursor = col.find(filter_query).sort(sort_spec).skip(offset).limit(limit)
     raw_docs = await cursor.to_list(length=limit)
     
     return [map_mongo_doc_to_clip(d) for d in raw_docs]
@@ -176,68 +201,12 @@ async def get_clips_count_mongo(
     streamer: Optional[str] = None,
     category: Optional[str] = None,
     period: Optional[str] = None,
-    days: Optional[int] = None
+    days: Optional[int] = None,
+    region: str = "ua"
 ) -> int:
-    col = get_collection()
+    col = get_collection(region)
     if col is None:
         return 0
 
-    filter_query: Dict[str, Any] = {}
-    
-    target_days = None
-    if days is not None and days > 0:
-        target_days = days
-    elif period:
-        p = period.lower().strip()
-        if p in ["1d", "24h", "today", "day", "1"]:
-            target_days = 1
-        elif p in ["7d", "week", "7"]:
-            target_days = 7
-        elif p in ["30d", "month", "30"]:
-            target_days = 30
-        elif p.endswith("d") and p[:-1].isdigit():
-            target_days = int(p[:-1])
-
-    if target_days:
-        cutoff_dt = datetime.utcnow() - timedelta(days=target_days)
-        cutoff_str_iso = cutoff_dt.isoformat()
-        cutoff_str_ua = cutoff_dt.strftime("%d.%m.%Y")
-        filter_query["$or"] = [
-            {"createdAt": {"$gte": cutoff_dt}},
-            {"created_at": {"$gte": cutoff_dt}},
-            {"createdAt": {"$gte": cutoff_str_iso}},
-            {"created_at": {"$gte": cutoff_str_iso}},
-            {"createdAt": {"$gte": cutoff_str_ua}}
-        ]
-
-    if min_views > 0:
-        views_filter = [
-            {"views": {"$gte": min_views}},
-            {"viewCount": {"$gte": min_views}}
-        ]
-        if filter_query.get("$or"):
-            filter_query = {"$and": [{"$or": filter_query["$or"]}, {"$or": views_filter}]}
-        else:
-            filter_query["$or"] = views_filter
-
-    if streamer:
-        regex_pattern = {"$regex": f"^{re.escape(streamer.strip())}$", "$options": "i"}
-        streamer_condition = {"$or": [{"streamer": regex_pattern}, {"author": regex_pattern}, {"channel": regex_pattern}]}
-        if "$and" in filter_query:
-            filter_query["$and"].append(streamer_condition)
-        elif filter_query:
-            filter_query = {"$and": [filter_query, streamer_condition]}
-        else:
-            filter_query = streamer_condition
-
-    if category:
-        cat_pattern = {"$regex": f"^{re.escape(category.strip())}$", "$options": "i"}
-        cat_condition = {"$or": [{"category": cat_pattern}, {"game": cat_pattern}]}
-        if "$and" in filter_query:
-            filter_query["$and"].append(cat_condition)
-        elif filter_query:
-            filter_query = {"$and": [filter_query, cat_condition]}
-        else:
-            filter_query = cat_condition
-
+    filter_query = build_mongo_filter(min_views, streamer, category, period, days)
     return await col.count_documents(filter_query)
