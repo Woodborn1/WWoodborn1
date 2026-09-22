@@ -1,7 +1,7 @@
 import sqlite3
 import os
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DB_PATH = os.getenv("DATABASE_PATH", "vamous_clips.db")
 
@@ -41,6 +41,7 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM clips")
     count = cursor.fetchone()[0]
     if count == 0:
+        now = datetime.utcnow()
         sample_clips = [
             (
                 "clip_9842",
@@ -49,7 +50,7 @@ def init_db():
                 "Лебіга про Альпи та лижі",
                 1250,
                 "Just Chatting",
-                datetime.utcnow().isoformat() + "Z",
+                (now - timedelta(hours=3)).isoformat() + "Z",
                 85,
                 "pending"
             ),
@@ -60,7 +61,7 @@ def init_db():
                 "Несподіваний візит ведмедя у Карпатах",
                 890,
                 "IRL",
-                datetime.utcnow().isoformat() + "Z",
+                (now - timedelta(days=2)).isoformat() + "Z",
                 42,
                 "pending"
             ),
@@ -71,7 +72,7 @@ def init_db():
                 "Неймовірний хайлайт на Centaur Warrunner",
                 3400,
                 "Dota 2",
-                datetime.utcnow().isoformat() + "Z",
+                (now - timedelta(days=12)).isoformat() + "Z",
                 156,
                 "pending"
             ),
@@ -82,7 +83,7 @@ def init_db():
                 "Історія про покупку старого буса",
                 2100,
                 "Just Chatting",
-                datetime.utcnow().isoformat() + "Z",
+                (now - timedelta(days=25)).isoformat() + "Z",
                 112,
                 "pending"
             )
@@ -95,13 +96,37 @@ def init_db():
     
     conn.close()
 
+def parse_period_to_cutoff(period: Optional[str], days: Optional[int] = None) -> Optional[str]:
+    """Converts period string ('1d', '24h', '7d', '30d') or days integer to ISO datetime cutoff."""
+    target_days = None
+    if days is not None and days > 0:
+        target_days = days
+    elif period:
+        p = period.lower().strip()
+        if p in ["1d", "24h", "today", "day", "1"]:
+            target_days = 1
+        elif p in ["7d", "week", "7"]:
+            target_days = 7
+        elif p in ["30d", "month", "30"]:
+            target_days = 30
+        elif p.endswith("d") and p[:-1].isdigit():
+            target_days = int(p[:-1])
+
+    if target_days:
+        cutoff = datetime.utcnow() - timedelta(days=target_days)
+        return cutoff.isoformat()
+    return None
+
 def get_clips(
     limit: int = 50,
     offset: int = 0,
     min_views: int = 0,
     streamer: Optional[str] = None,
     category: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    period: Optional[str] = None,
+    days: Optional[int] = None,
+    sort_by: str = "views"
 ) -> List[Dict[str, Any]]:
     ensure_db()
     conn = get_db_connection()
@@ -110,19 +135,30 @@ def get_clips(
     query = "SELECT id, url, streamer, title, views, category, created_at, chat_activity FROM clips WHERE views >= ?"
     params: List[Any] = [min_views]
     
+    cutoff_date = parse_period_to_cutoff(period, days)
+    if cutoff_date:
+        query += " AND created_at >= ?"
+        params.append(cutoff_date)
+    
     if streamer:
         query += " AND LOWER(streamer) = LOWER(?)"
-        params.append(streamer)
+        params.append(streamer.strip())
         
     if category:
         query += " AND LOWER(category) = LOWER(?)"
-        params.append(category)
+        params.append(category.strip())
         
     if status:
         query += " AND status = ?"
-        params.append(status)
+        params.append(status.strip())
         
-    query += " ORDER BY created_in_db DESC LIMIT ? OFFSET ?"
+    if sort_by == "recent" or sort_by == "date":
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    elif sort_by == "chat":
+        query += " ORDER BY chat_activity DESC LIMIT ? OFFSET ?"
+    else:  # default 'views'
+        query += " ORDER BY views DESC LIMIT ? OFFSET ?"
+        
     params.extend([limit, offset])
     
     cursor.execute(query, params)
@@ -135,7 +171,9 @@ def get_clips_count(
     min_views: int = 0,
     streamer: Optional[str] = None,
     category: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    period: Optional[str] = None,
+    days: Optional[int] = None
 ) -> int:
     ensure_db()
     conn = get_db_connection()
@@ -144,15 +182,20 @@ def get_clips_count(
     query = "SELECT COUNT(*) FROM clips WHERE views >= ?"
     params: List[Any] = [min_views]
     
+    cutoff_date = parse_period_to_cutoff(period, days)
+    if cutoff_date:
+        query += " AND created_at >= ?"
+        params.append(cutoff_date)
+    
     if streamer:
         query += " AND LOWER(streamer) = LOWER(?)"
-        params.append(streamer)
+        params.append(streamer.strip())
     if category:
         query += " AND LOWER(category) = LOWER(?)"
-        params.append(category)
+        params.append(category.strip())
     if status:
         query += " AND status = ?"
-        params.append(status)
+        params.append(status.strip())
         
     cursor.execute(query, params)
     count = cursor.fetchone()[0]
